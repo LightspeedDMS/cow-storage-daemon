@@ -1,0 +1,6 @@
+{
+  "base_path": "/data/cow-clones",
+  "api_key": "change-me-to-a-secure-random-key",
+  "db_path": "/data/cow-clones/.cow-daemon.db",
+  "health_requires_auth": false
+}
