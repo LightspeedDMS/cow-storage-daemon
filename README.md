@@ -66,6 +66,115 @@ The installer:
 
 Idempotent: safe to re-run. Supports Rocky Linux, RHEL, and Ubuntu.
 
+## NFS Setup (Multi-Node Access)
+
+When running a multi-node cluster, client nodes need NFS access to the daemon's
+storage directory to read clone contents. The daemon creates clones via its REST
+API; NFS provides the filesystem-level access.
+
+### Server Side (Daemon Host)
+
+**1. Install NFS server:**
+
+```bash
+# Rocky Linux / RHEL
+sudo dnf install -y nfs-utils
+sudo systemctl enable --now nfs-server
+
+# Ubuntu / Debian
+sudo apt install -y nfs-kernel-server
+sudo systemctl enable --now nfs-kernel-server
+```
+
+**2. Export the storage directory:**
+
+```bash
+# Permissive (dev/test) — replace /srv/cow-storage with your --storage-path
+echo '/srv/cow-storage  *(rw,sync,no_subtree_check,no_root_squash)' | sudo tee -a /etc/exports
+
+# Production — restrict to cluster subnet
+echo '/srv/cow-storage  10.0.0.0/24(rw,sync,no_subtree_check,no_root_squash)' | sudo tee -a /etc/exports
+
+# Apply and verify
+sudo exportfs -ra
+showmount -e localhost
+```
+
+**3. Open firewall ports:**
+
+| Port | Protocol | Service |
+|------|----------|---------|
+| 2049 | TCP/UDP | NFS |
+| 111 | TCP/UDP | rpcbind |
+| 8081 | TCP | Daemon API (default) |
+
+```bash
+# firewalld (Rocky/RHEL)
+sudo firewall-cmd --permanent --add-service=nfs
+sudo firewall-cmd --permanent --add-service=rpc-bind
+sudo firewall-cmd --permanent --add-service=mountd
+sudo firewall-cmd --permanent --add-port=8081/tcp
+sudo firewall-cmd --reload
+
+# ufw (Ubuntu)
+sudo ufw allow from 10.0.0.0/24 to any port nfs
+sudo ufw allow from 10.0.0.0/24 to any port 111
+sudo ufw allow from 10.0.0.0/24 to any port 8081
+```
+
+**AWS Security Groups:** Inbound rules for TCP/UDP 2049, TCP/UDP 111, and TCP 8081
+from the cluster subnet CIDR.
+
+### Client Side (CIDX / Claude Server Nodes)
+
+**1. Install NFS client:**
+
+```bash
+sudo dnf install -y nfs-utils     # Rocky/RHEL
+sudo apt install -y nfs-common    # Ubuntu
+```
+
+**2. Mount:**
+
+```bash
+sudo mkdir -p /mnt/cow-storage
+sudo mount -t nfs -o vers=3,nolock cow-host:/srv/cow-storage /mnt/cow-storage
+```
+
+**3. Persist in fstab:**
+
+```bash
+echo 'cow-host:/srv/cow-storage  /mnt/cow-storage  nfs  vers=3,nolock,_netdev  0  0' | sudo tee -a /etc/fstab
+```
+
+**4. Verify:**
+
+```bash
+df -h /mnt/cow-storage
+ls /mnt/cow-storage/
+```
+
+### Clone Path Resolution
+
+The API returns **relative** clone paths. Clients prepend their NFS mount point:
+
+```
+API returns:    clone_path = "cidx/my-clone"
+Client mount:   /mnt/cow-storage
+Absolute path:  /mnt/cow-storage/cidx/my-clone
+```
+
+### NFS Troubleshooting
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `mount` hangs | Firewall blocking port 2049 | Open NFS ports on server |
+| `access denied` | Wrong subnet in `/etc/exports` | Fix exports, run `exportfs -ra` |
+| `No such file or directory` | Export path doesn't exist | Verify `--storage-path` directory |
+| Clones not visible | NFS attribute cache | `ls` the directory, or mount with `actimeo=1` |
+| `Permission denied` | UID/GID mismatch | Use `no_root_squash` or match UIDs |
+| `Stale file handle` | Handle invalidated after restart | `umount -f` then `mount -a` |
+
 ## Configuration
 
 Configuration is loaded from a JSON file specified by the `COW_DAEMON_CONFIG`
