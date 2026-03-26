@@ -227,6 +227,16 @@ else
     exit 1
 fi
 
+# Verify cow-cli entry point is available
+if ! $DRY_RUN; then
+    log_info "Verifying entry points..."
+    if command -v cow-cli &>/dev/null || python3 -m cow_cli --version &>/dev/null; then
+        log_info "cow-cli: $(python3 -m cow_cli --version 2>&1 || echo 'available')"
+    else
+        log_warn "cow-cli entry point not on PATH (available via: python3 -m cow_cli)"
+    fi
+fi
+
 # ---------------------------------------------------------------------------
 # Step 4: Generate or validate API key
 # ---------------------------------------------------------------------------
@@ -381,6 +391,7 @@ echo "  API key:     (stored in $CONFIG_FILE)"
 echo ""
 echo "  Health:      curl http://localhost:$PORT/api/v1/health"
 echo "  Manage:      sudo systemctl {start|stop|restart|status} $SERVICE_NAME"
+echo "  CLI:         cow-cli --help (or: python3 -m cow_cli --help)"
 echo ""
 echo "--- NFS Export Instructions ---"
 echo ""

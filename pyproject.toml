@@ -13,7 +13,13 @@ dependencies = [
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
     "aiosqlite>=0.19.0",
+    "click>=8.1.0",
+    "httpx>=0.25.0",
 ]
+
+[project.scripts]
+cow-cli = "cow_cli.main:cli"
+cow-daemon = "cow_storage_daemon.__main__:main"
 
 [project.optional-dependencies]
 dev = [
