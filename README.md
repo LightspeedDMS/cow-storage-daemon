@@ -98,6 +98,116 @@ Example (`config.json.example`):
 Settings can also be provided via environment variables with the `COW_DAEMON_` prefix
 (e.g., `COW_DAEMON_BASE_PATH`), but the config file is the recommended approach.
 
+## CLI (`cow-cli`)
+
+A command-line interface that wraps all daemon API endpoints. Register a daemon
+once, and all subsequent commands auto-inject the API token -- no more curl.
+
+### Install
+
+```bash
+pip install -e .
+# Or via the installer script (installs both daemon and CLI):
+./scripts/install-cow-daemon.sh --storage-path /srv/cow-storage
+```
+
+After install, `cow-cli` is on your PATH. Alternative: `python -m cow_cli`.
+
+### Connection Management
+
+```bash
+# Register a daemon (first connection auto-activates)
+cow-cli connect prod http://cow-host:8081 --token <your-api-key>
+
+# Register a second daemon
+cow-cli connect staging http://staging:8081 --token <staging-key>
+
+# List connections (* = active)
+cow-cli connections
+
+# Switch active daemon
+cow-cli activate staging
+
+# Update a token (rotation)
+cow-cli update prod --token <new-key>
+
+# Remove a connection
+cow-cli disconnect staging
+```
+
+Connections are stored in `~/.cow-storage/config.json` (chmod 600, atomic writes).
+
+### Clone Operations
+
+```bash
+# Create a clone (waits for completion by default)
+cow-cli clone /data/golden-repos/my-repo --namespace cidx --name my-clone
+
+# Fire-and-forget (returns job ID immediately)
+cow-cli clone /data/golden-repos/my-repo --namespace cidx --name my-clone --nowait
+
+# Check async job status
+cow-cli job <job-id>
+
+# List all clones
+cow-cli list
+
+# Filter by namespace
+cow-cli list --namespace cidx
+
+# Inspect a specific clone
+cow-cli info cidx my-clone
+
+# Delete (with confirmation prompt)
+cow-cli delete cidx my-clone
+
+# Delete without prompt
+cow-cli delete cidx my-clone --force
+```
+
+### Health & Stats
+
+```bash
+# Health check (active daemon)
+cow-cli health
+
+# Health check all registered daemons
+cow-cli health --all
+
+# Storage statistics
+cow-cli stats
+```
+
+### JSON Output
+
+All commands support `--json` for scripting:
+
+```bash
+cow-cli --json list
+cow-cli --json health
+cow-cli --json stats
+cow-cli --json info cidx my-clone
+```
+
+### All Commands
+
+| Command | Description |
+|---------|-------------|
+| `connect <alias> <url> --token <token>` | Register a daemon connection |
+| `connections` | List registered daemons |
+| `activate <alias-or-url>` | Switch active connection |
+| `update <alias> --token <token>` | Rotate API token |
+| `disconnect <alias>` | Remove a connection |
+| `clone <source> --namespace <ns> --name <name>` | Create a CoW clone |
+| `list [--namespace <ns>]` | List clones |
+| `info <namespace> <name>` | Inspect clone details |
+| `delete <namespace> <name> [--force]` | Delete a clone |
+| `job <job-id>` | Check async job status |
+| `health [--all]` | Daemon health check |
+| `stats` | Storage statistics |
+
+No TLS certificate verification (designed for internal networks).
+
 ## REST API Reference
 
 All endpoints are prefixed with `/api/v1`. Authentication is via `Authorization: Bearer <api_key>` header.
@@ -342,6 +452,16 @@ src/cow_storage_daemon/
     metadata_store.py      # SQLite metadata (jobs, clones)
   health/
     health_service.py      # Health check and statistics
+src/cow_cli/
+  __main__.py              # python -m cow_cli support
+  main.py                  # Click CLI group + global flags
+  config.py                # Connection management (~/.cow-storage/config.json)
+  client.py                # HTTP client with auto token injection
+  output.py                # Table and JSON formatting
+  commands/
+    connection.py          # connect, connections, activate, update, disconnect
+    clone.py               # clone, list, info, delete, job
+    health.py              # health, stats
 scripts/
   install-cow-daemon.sh    # Production installer with systemd
 ```
