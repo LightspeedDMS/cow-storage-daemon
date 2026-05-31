@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cow-storage-daemon"
-version = "0.1.0"
+version = "0.2.0"
 description = "CoW Storage Daemon - REST API for Copy-on-Write clone management"
 requires-python = ">=3.9"
 dependencies = [

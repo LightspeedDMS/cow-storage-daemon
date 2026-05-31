@@ -41,7 +41,7 @@ class MetadataStore:
             self._db = None
 
     async def _create_tables(self) -> None:
-        """Create clones and jobs tables if they do not exist."""
+        """Create clones and jobs tables if they do not exist, then migrate schema."""
         async with self._write_lock:
             await self._db.execute(
                 """
@@ -72,6 +72,24 @@ class MetadataStore:
                 """
             )
             await self._db.commit()
+        # Run schema migrations after initial table creation
+        await self._migrate_schema()
+
+    async def _migrate_schema(self) -> None:
+        """Apply backward-compatible schema migrations.
+
+        Each migration is idempotent: it checks whether the change is needed
+        before applying it, so running initialize() multiple times is safe.
+        """
+        async with self._write_lock:
+            # Migration: add dest_path column if not present (D1 / Codex I1)
+            async with self._db.execute("PRAGMA table_info(clones)") as cursor:
+                columns = [row[1] async for row in cursor]
+            if "dest_path" not in columns:
+                await self._db.execute(
+                    "ALTER TABLE clones ADD COLUMN dest_path TEXT"
+                )
+                await self._db.commit()
 
     # ------------------------------------------------------------------
     # Clone CRUD
@@ -84,16 +102,18 @@ class MetadataStore:
         source_path: str,
         clone_path: str,
         size_bytes: int,
+        dest_path: Optional[str] = None,
     ) -> None:
         """Persist a new clone record."""
         created_at = datetime.now(timezone.utc).isoformat()
         async with self._write_lock:
             await self._db.execute(
                 """
-                INSERT INTO clones (namespace, name, source_path, clone_path, created_at, size_bytes)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO clones
+                    (namespace, name, source_path, clone_path, created_at, size_bytes, dest_path)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (namespace, name, source_path, clone_path, created_at, size_bytes),
+                (namespace, name, source_path, clone_path, created_at, size_bytes, dest_path),
             )
             await self._db.commit()
 

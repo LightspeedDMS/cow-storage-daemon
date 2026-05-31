@@ -87,6 +87,28 @@ class CloneManager:
             f"{self._allowed_source_roots}"
         )
 
+    def _validate_dest_path(self, dest_path: str) -> str:
+        """Validate dest_path is non-empty and resolves under storage_path.
+
+        Uses Path.resolve() before comparison so symlinks, '..' traversal,
+        and double slashes are all defeated (mirrors _validate_source_path pattern).
+
+        Returns the resolved absolute path string if valid.
+        Raises PathNotAllowedError if empty or outside storage_path.
+        """
+        if not dest_path:
+            raise PathNotAllowedError("dest_path must not be empty")
+
+        resolved = Path(dest_path).resolve()
+        storage_root = Path(self._base_path).resolve()
+        try:
+            resolved.relative_to(storage_root)
+        except ValueError:
+            raise PathNotAllowedError(
+                f"dest_path must be under storage_path: {dest_path}"
+            )
+        return str(resolved)
+
     async def _get_source_lock(self, source_path: str) -> asyncio.Lock:
         """Return (creating if needed) the asyncio.Lock for a given source_path.
 
@@ -103,15 +125,28 @@ class CloneManager:
             return lock
 
     async def submit_clone_job(
-        self, source_path: str, namespace: str, name: str
+        self,
+        source_path: str,
+        namespace: str,
+        name: str,
+        dest_path: Optional[str] = None,
     ) -> str:
         """Submit a clone creation job. Returns job_id immediately (AC3).
 
         Raises ConflictError if a clone with namespace+name already exists.
-        Raises PathNotAllowedError if source_path is not under allowed roots.
+        Raises PathNotAllowedError if source_path is not under allowed roots,
+        or if dest_path is provided but resolves outside storage_path.
         The actual clone runs in a background asyncio task.
+
+        When dest_path is provided, the clone is placed at that resolved path
+        and stored in metadata. When None, the legacy {base}/{namespace}/{name}
+        layout is used (backward compatible).
         """
         self._validate_source_path(source_path)
+
+        validated_dest: Optional[str] = None
+        if dest_path is not None:
+            validated_dest = self._validate_dest_path(dest_path)
 
         if await self._store.clone_exists(namespace, name):
             raise ConflictError(
@@ -124,34 +159,48 @@ class CloneManager:
 
         # Launch background task without waiting for it
         asyncio.create_task(
-            self._run_clone_job(job_id, source_path, namespace, name)
+            self._run_clone_job(job_id, source_path, namespace, name, validated_dest)
         )
         return job_id
 
     async def _run_clone_job(
-        self, job_id: str, source_path: str, namespace: str, name: str
+        self,
+        job_id: str,
+        source_path: str,
+        namespace: str,
+        name: str,
+        dest_path: Optional[str] = None,
     ) -> None:
-        """Execute the clone operation in the background (AC3, AC7)."""
+        """Execute the clone operation in the background (AC3, AC7).
+
+        When dest_path is provided (already validated and resolved), the clone
+        is placed there. Otherwise the legacy {base}/{namespace}/{name} layout
+        is used for full backward compatibility.
+        """
         await self._store.update_job_status(job_id, "running")
 
-        dest_path = Path(self._base_path) / namespace / name
-        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        if dest_path is not None:
+            actual_dest = Path(dest_path)
+        else:
+            actual_dest = Path(self._base_path) / namespace / name
+        actual_dest.parent.mkdir(parents=True, exist_ok=True)
 
         source_lock = await self._get_source_lock(source_path)
         async with source_lock:
             try:
-                await filesystem.perform_reflink_copy(source_path, str(dest_path))
+                await filesystem.perform_reflink_copy(source_path, str(actual_dest))
 
                 # FIX 5: compute actual directory size after clone
-                size_bytes = await asyncio.to_thread(_get_dir_size, str(dest_path))
+                size_bytes = await asyncio.to_thread(_get_dir_size, str(actual_dest))
 
-                clone_path = f"{namespace}/{name}"
+                clone_path = str(actual_dest)
                 await self._store.save_clone(
                     namespace=namespace,
                     name=name,
                     source_path=source_path,
                     clone_path=clone_path,
                     size_bytes=size_bytes,
+                    dest_path=dest_path,
                 )
                 await self._store.update_job_status(
                     job_id, "completed", clone_path=clone_path
@@ -170,16 +219,41 @@ class CloneManager:
         return await self._store.get_clone(namespace, name)
 
     async def delete_clone(self, namespace: str, name: str) -> bool:
-        """Delete a clone's directory and metadata. Returns True if deleted."""
+        """Delete a clone's directory and metadata. Returns True if deleted.
+
+        Reads the actual path from metadata (dest_path if set, else the legacy
+        {base}/{namespace}/{name} layout). Raises on rmtree errors instead of
+        silently swallowing them — silent failure was the root cause of disk leaks
+        for dest_path-based clones (Codex B1).
+        """
+        import logging
+        import shutil
+
+        logger = logging.getLogger(__name__)
+
         clone = await self._store.get_clone(namespace, name)
         if clone is None:
             return False
 
-        # Remove the clone directory from disk
-        clone_dir = Path(self._base_path) / namespace / name
+        # Determine the actual directory to remove from metadata
+        stored_dest = clone.get("dest_path")
+        if stored_dest:
+            clone_dir = Path(stored_dest)
+        else:
+            clone_dir = Path(self._base_path) / namespace / name
+
         if clone_dir.exists():
-            import shutil
-            await asyncio.to_thread(shutil.rmtree, str(clone_dir), ignore_errors=True)
+            try:
+                await asyncio.to_thread(shutil.rmtree, str(clone_dir))
+            except Exception as exc:
+                logger.error(
+                    "Failed to remove clone directory %s for %s/%s: %s",
+                    clone_dir,
+                    namespace,
+                    name,
+                    exc,
+                )
+                raise
 
         return await self._store.delete_clone(namespace, name)
 

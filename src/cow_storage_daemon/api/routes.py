@@ -17,6 +17,7 @@ from cow_storage_daemon.api.models import (
     JobStatusResponse,
     StatsResponse,
 )
+from cow_storage_daemon import __version__ as DAEMON_VERSION
 from cow_storage_daemon.core.clone_manager import CloneManager, ConflictError, PathNotAllowedError
 
 
@@ -39,7 +40,7 @@ def create_router(
     @router.get("/health", response_model=HealthResponse)
     async def health(_auth: bool = Depends(health_auth)):
         data = await health_service.get_health()
-        return HealthResponse(**data)
+        return HealthResponse(**data, version=DAEMON_VERSION)
 
     @router.get("/stats", response_model=StatsResponse)
     async def stats(_auth: bool = Depends(require_auth)):
@@ -56,6 +57,7 @@ def create_router(
                 source_path=body.source_path,
                 namespace=body.namespace,
                 name=body.name,
+                dest_path=body.dest_path,
             )
         except PathNotAllowedError as exc:
             raise HTTPException(

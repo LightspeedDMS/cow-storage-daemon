@@ -218,6 +218,114 @@ class TestJobTracking:
         assert id1 != id2
 
 
+class TestDestPathMigration:
+    """Tests for backward-compatible schema migration adding dest_path column (D1 / Codex I1)."""
+
+    async def test_migration_adds_dest_path_column_on_fresh_db(self, tmp_path):
+        """Fresh DB gets dest_path column after initialize()."""
+        import aiosqlite
+        db_path = tmp_path / "fresh.db"
+        store = MetadataStore(str(db_path))
+        await store.initialize()
+        # Inspect schema
+        async with aiosqlite.connect(str(db_path)) as db:
+            async with db.execute("PRAGMA table_info(clones)") as cursor:
+                columns = [row[1] async for row in cursor]
+        await store.close()
+        assert "dest_path" in columns
+
+    async def test_migration_is_idempotent(self, tmp_path):
+        """Running initialize() twice does not raise even when dest_path already exists."""
+        db_path = tmp_path / "idem.db"
+        store = MetadataStore(str(db_path))
+        await store.initialize()
+        await store.close()
+        # Re-open: second initialize must not fail
+        store2 = MetadataStore(str(db_path))
+        await store2.initialize()  # Must not raise
+        await store2.close()
+
+    async def test_migration_on_legacy_db_without_dest_path(self, tmp_path):
+        """Migration succeeds on a pre-existing DB that lacks the dest_path column."""
+        import aiosqlite
+        db_path = tmp_path / "legacy.db"
+        # Create a 'legacy' DB without dest_path column
+        async with aiosqlite.connect(str(db_path)) as db:
+            await db.execute("PRAGMA journal_mode=WAL")
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS clones (
+                    namespace TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    source_path TEXT NOT NULL,
+                    clone_path TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    size_bytes INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (namespace, name)
+                )
+                """
+            )
+            await db.execute(
+                """INSERT INTO clones (namespace, name, source_path, clone_path, created_at, size_bytes)
+                   VALUES ('ns', 'c1', '/src', 'ns/c1', '2024-01-01T00:00:00+00:00', 0)"""
+            )
+            await db.commit()
+        # Now open via MetadataStore — should migrate without data loss
+        store = MetadataStore(str(db_path))
+        await store.initialize()
+        clone = await store.get_clone("ns", "c1")
+        await store.close()
+        assert clone is not None
+        assert clone["namespace"] == "ns"
+        assert clone.get("dest_path") is None  # Legacy row gets NULL
+
+    async def test_legacy_row_returns_dest_path_none(self, store):
+        """get_clone on a row saved without dest_path returns dest_path=None."""
+        await store.save_clone(
+            namespace="ns",
+            name="legacy",
+            source_path="/data",
+            clone_path="ns/legacy",
+            size_bytes=0,
+            # dest_path not provided — defaults to None
+        )
+        clone = await store.get_clone("ns", "legacy")
+        assert clone is not None
+        assert clone.get("dest_path") is None
+
+
+class TestDestPathRoundTrip:
+    """Tests for save_clone/get_clone dest_path persistence (D1)."""
+
+    async def test_save_clone_with_dest_path_round_trips(self, store):
+        """save_clone(dest_path=...) persists and get_clone returns the same value."""
+        dest = "/storage/.versioned/alias-with.dots/v_123"
+        await store.save_clone(
+            namespace="ns",
+            name="clone",
+            source_path="/storage/source",
+            clone_path="/storage/.versioned/alias-with.dots/v_123",
+            size_bytes=512,
+            dest_path=dest,
+        )
+        clone = await store.get_clone("ns", "clone")
+        assert clone is not None
+        assert clone["dest_path"] == dest
+
+    async def test_save_clone_without_dest_path_returns_none(self, store):
+        """save_clone without dest_path returns dest_path=None on get_clone."""
+        await store.save_clone(
+            namespace="ns",
+            name="nodest",
+            source_path="/data",
+            clone_path="ns/nodest",
+            size_bytes=0,
+        )
+        clone = await store.get_clone("ns", "nodest")
+        assert clone is not None
+        assert clone.get("dest_path") is None
+
+
 class TestConcurrentWrites:
     """Tests for asyncio.Lock protecting writes (AC6)."""
 

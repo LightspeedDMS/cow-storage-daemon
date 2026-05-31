@@ -329,6 +329,7 @@ Health check. Optionally unauthenticated (controlled by `health_requires_auth` c
 ```json
 {
   "status": "healthy",
+  "version": "0.2.0",
   "filesystem_type": "xfs",
   "cow_method": "reflink",
   "disk_total_bytes": 319026491392,
@@ -365,15 +366,17 @@ Submit an async clone creation job. Returns immediately with a job ID. Requires 
 {
   "source_path": "/data/golden-repos/my-repo",
   "namespace": "cidx",
-  "name": "cidx_clone_my-repo_1700000000"
+  "name": "cidx_clone_my-repo_1700000000",
+  "dest_path": "/storage/cidx/.versioned/alias/v_1700000000"
 }
 ```
 
-| Field | Constraints |
-|-------|-------------|
-| `source_path` | Must exist on disk. Must be under an `allowed_source_roots` entry (if configured). |
-| `namespace` | Alphanumeric, hyphens, underscores. Max 64 chars. |
-| `name` | Alphanumeric, hyphens, underscores. Max 128 chars. |
+| Field | Required | Constraints |
+|-------|----------|-------------|
+| `source_path` | Yes | Must exist on disk. Must be under an `allowed_source_roots` entry (if configured). |
+| `namespace` | Yes | Alphanumeric, hyphens, underscores. Max 64 chars. |
+| `name` | Yes | Alphanumeric, hyphens, underscores. Max 128 chars. |
+| `dest_path` | No | Explicit destination path for the clone. Must be under the daemon's storage path. If omitted, the daemon auto-selects a path under `{storage_path}/{namespace}/{name}`. Returns HTTP 400 with code `PATH_NOT_ALLOWED` if the path escapes the storage boundary. |
 
 **Response** (202 Accepted):
 ```json

@@ -15,6 +15,78 @@ from cow_storage_daemon.api.models import (
 )
 
 
+class TestCloneCreateRequestDestPath:
+    """Tests for optional dest_path field on CloneCreateRequest (D1)."""
+
+    def test_dest_path_defaults_to_none(self):
+        req = CloneCreateRequest(
+            source_path="/data/repos/myrepo",
+            namespace="cidx",
+            name="clone-001",
+        )
+        assert req.dest_path is None
+
+    def test_dest_path_accepts_none_explicitly(self):
+        req = CloneCreateRequest(
+            source_path="/data/repos/myrepo",
+            namespace="cidx",
+            name="clone-001",
+            dest_path=None,
+        )
+        assert req.dest_path is None
+
+    def test_dest_path_accepts_path_with_dots(self):
+        """CIDX aliases have dots — dest_path must allow them."""
+        req = CloneCreateRequest(
+            source_path="/storage/source",
+            namespace="cidx",
+            name="v_1",
+            dest_path="/storage/.versioned/langfuse_Claude_Code_seba.battig_lightspeeddms.com/v_1",
+        )
+        assert req.dest_path == "/storage/.versioned/langfuse_Claude_Code_seba.battig_lightspeeddms.com/v_1"
+
+    def test_dest_path_accepts_plain_path(self):
+        req = CloneCreateRequest(
+            source_path="/storage/source",
+            namespace="ns",
+            name="v1",
+            dest_path="/storage/.versioned/alias/v_123",
+        )
+        assert req.dest_path == "/storage/.versioned/alias/v_123"
+
+
+class TestHealthResponseVersion:
+    """Tests for version field in HealthResponse (D1 / Codex O4)."""
+
+    def test_health_response_has_version_field(self):
+        from cow_storage_daemon import __version__
+        resp = HealthResponse(
+            status="healthy",
+            filesystem_type="xfs",
+            cow_method="reflink",
+            disk_total_bytes=100,
+            disk_used_bytes=40,
+            disk_available_bytes=60,
+            uptime_seconds=10.0,
+            version=__version__,
+        )
+        assert resp.version == __version__
+
+    def test_health_response_version_required(self):
+        """version field must be required (no default)."""
+        with pytest.raises(Exception):
+            HealthResponse(
+                status="healthy",
+                filesystem_type="xfs",
+                cow_method="reflink",
+                disk_total_bytes=100,
+                disk_used_bytes=40,
+                disk_available_bytes=60,
+                uptime_seconds=10.0,
+                # version omitted — should fail
+            )
+
+
 class TestCloneCreateRequest:
     """Tests for clone creation request model."""
 
@@ -201,6 +273,7 @@ class TestHealthResponse:
     def test_valid_health_response(self):
         resp = HealthResponse(
             status="healthy",
+            version="0.2.0",
             filesystem_type="xfs",
             cow_method="reflink",
             disk_total_bytes=100_000_000_000,
@@ -214,6 +287,7 @@ class TestHealthResponse:
     def test_serializes_correctly(self):
         resp = HealthResponse(
             status="healthy",
+            version="0.2.0",
             filesystem_type="xfs",
             cow_method="reflink",
             disk_total_bytes=1000,
@@ -224,6 +298,7 @@ class TestHealthResponse:
         data = resp.model_dump()
         assert "filesystem_type" in data
         assert "uptime_seconds" in data
+        assert "version" in data
 
 
 class TestStatsResponse:

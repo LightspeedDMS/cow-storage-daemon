@@ -34,6 +34,7 @@ class CloneCreateRequest(BaseModel):
     source_path: str
     namespace: str
     name: str
+    dest_path: Optional[str] = None
 
     @field_validator("namespace")
     @classmethod
@@ -91,6 +92,7 @@ class HealthResponse(BaseModel):
     """Response body for GET /api/v1/health."""
 
     status: str
+    version: str
     filesystem_type: str
     cow_method: str
     disk_total_bytes: int
