@@ -61,7 +61,15 @@ class CloneManager:
         if source_lock_max is not None:
             self.SOURCE_LOCK_MAX = source_lock_max
         self._source_locks: OrderedDict[str, asyncio.Lock] = OrderedDict()
-        self._source_locks_mutex = asyncio.Lock()
+        # NOTE: do NOT create the mutex here. In Python 3.9 asyncio.Lock() binds to
+        # the loop returned by get_event_loop() AT CREATION TIME. CloneManager is
+        # constructed before/outside uvicorn's serving loop, so a mutex created here
+        # would bind to the wrong loop and raise "got Future ... attached to a
+        # different loop" under CONTENDED _get_source_lock (concurrent creates).
+        # It is created lazily inside the running loop via _get_source_locks_mutex(),
+        # which rebinds the mutex if the running loop has changed since creation.
+        self._source_locks_mutex: Optional[asyncio.Lock] = None
+        self._source_locks_mutex_loop: Optional[asyncio.AbstractEventLoop] = None
 
     def _validate_source_path(self, source_path: str) -> None:
         """Validate source_path against allowed_source_roots.
@@ -109,12 +117,36 @@ class CloneManager:
             )
         return str(resolved)
 
+    def _get_source_locks_mutex(self) -> asyncio.Lock:
+        """Return the LRU-map mutex bound to the CURRENTLY running event loop.
+
+        Created lazily (not in __init__) and REBOUND if the running loop has changed
+        since creation -- the daemon constructs the manager on the throwaway
+        ``asyncio.run`` loop in __main__ but serves on the uvicorn loop, and a mutex
+        bound to the construction loop raises "got Future ... attached to a different
+        loop" under CONTENDED _get_source_lock (concurrent creates -> HTTP 500).
+
+        On a loop change the per-source lock map is also cleared: every asyncio.Lock
+        stored in it was bound to the old loop and must not be reused on the new loop.
+        """
+        running_loop = asyncio.get_running_loop()
+        if (
+            self._source_locks_mutex is None
+            or self._source_locks_mutex_loop is not running_loop
+        ):
+            self._source_locks_mutex = asyncio.Lock()
+            self._source_locks_mutex_loop = running_loop
+            # Per-source locks belonged to the previous loop -- discard them so new
+            # ones are created bound to the running loop.
+            self._source_locks.clear()
+        return self._source_locks_mutex
+
     async def _get_source_lock(self, source_path: str) -> asyncio.Lock:
         """Return (creating if needed) the asyncio.Lock for a given source_path.
 
         Uses LRU eviction to bound the map to SOURCE_LOCK_MAX entries.
         """
-        async with self._source_locks_mutex:
+        async with self._get_source_locks_mutex():
             if source_path in self._source_locks:
                 self._source_locks.move_to_end(source_path)
                 return self._source_locks[source_path]
