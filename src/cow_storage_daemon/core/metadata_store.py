@@ -22,11 +22,50 @@ class MetadataStore:
 
     def __init__(self, db_path: str) -> None:
         self._db_path = db_path
-        self._write_lock = asyncio.Lock()
+        # NOTE: do NOT create the asyncio.Lock here. In Python 3.9 asyncio.Lock()
+        # binds to the event loop returned by get_event_loop() AT CREATION TIME.
+        # This store is constructed before/outside uvicorn's serving loop, so a lock
+        # created here would bind to the wrong loop -- uncontended acquire() works via
+        # a fast path, but CONTENDED acquire() awaits a Future on the bound loop from
+        # the serving loop and raises "got Future ... attached to a different loop"
+        # (HTTP 500 on concurrent creates). The lock is created lazily inside the
+        # running serving loop via _get_write_lock() instead.
+        self._write_lock: Optional[asyncio.Lock] = None
+        self._write_lock_loop: Optional[asyncio.AbstractEventLoop] = None
         self._db: Optional[aiosqlite.Connection] = None
 
+    def _get_write_lock(self) -> asyncio.Lock:
+        """Return the write lock bound to the CURRENTLY running event loop.
+
+        Must be called from within an async path (a running loop). The lock is
+        created lazily on first use and is REBOUND if the running loop has changed
+        since it was created.
+
+        Why rebind: the daemon constructs the store and runs initialize() inside the
+        short-lived ``asyncio.run(_create())`` loop in __main__, then serves requests
+        on a DIFFERENT uvicorn loop. A lock bound to the init loop raises
+        "got Future ... attached to a different loop" the moment a CONTENDED acquire
+        happens on the serving loop (the proven concurrent-create HTTP 500). Binding
+        to the running loop -- and recreating on loop change -- guarantees the lock
+        always belongs to the loop that is actually awaiting it.
+
+        Safety: a rebind only replaces the lock object when no contended waiters can
+        exist on the old loop, because acquire() on the old (now non-running) loop is
+        impossible -- only the running loop can reach this code.
+        """
+        running_loop = asyncio.get_running_loop()
+        if self._write_lock is None or self._write_lock_loop is not running_loop:
+            self._write_lock = asyncio.Lock()
+            self._write_lock_loop = running_loop
+        return self._write_lock
+
     async def initialize(self) -> None:
-        """Open the database connection, enable WAL mode, and create tables."""
+        """Open the database connection, enable WAL mode, and create tables.
+
+        The write lock is intentionally NOT pre-bound here: initialize() may run on a
+        throwaway loop (see __main__), so the lock is created on first use within the
+        serving loop via _get_write_lock(), which rebinds on loop change.
+        """
         if self._db is not None:
             return
         self._db = await aiosqlite.connect(self._db_path)
@@ -42,7 +81,7 @@ class MetadataStore:
 
     async def _create_tables(self) -> None:
         """Create clones and jobs tables if they do not exist, then migrate schema."""
-        async with self._write_lock:
+        async with self._get_write_lock():
             await self._db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS clones (
@@ -81,7 +120,7 @@ class MetadataStore:
         Each migration is idempotent: it checks whether the change is needed
         before applying it, so running initialize() multiple times is safe.
         """
-        async with self._write_lock:
+        async with self._get_write_lock():
             # Migration: add dest_path column if not present (D1 / Codex I1)
             async with self._db.execute("PRAGMA table_info(clones)") as cursor:
                 columns = [row[1] async for row in cursor]
@@ -106,7 +145,7 @@ class MetadataStore:
     ) -> None:
         """Persist a new clone record."""
         created_at = datetime.now(timezone.utc).isoformat()
-        async with self._write_lock:
+        async with self._get_write_lock():
             await self._db.execute(
                 """
                 INSERT INTO clones
@@ -128,7 +167,7 @@ class MetadataStore:
 
     async def delete_clone(self, namespace: str, name: str) -> bool:
         """Delete a clone record. Returns True if deleted, False if not found."""
-        async with self._write_lock:
+        async with self._get_write_lock():
             cursor = await self._db.execute(
                 "DELETE FROM clones WHERE namespace = ? AND name = ?",
                 (namespace, name),
@@ -179,7 +218,7 @@ class MetadataStore:
         """Create a new job record in 'pending' state. Returns the job_id."""
         job_id = str(uuid.uuid4())
         created_at = datetime.now(timezone.utc).isoformat()
-        async with self._write_lock:
+        async with self._get_write_lock():
             await self._db.execute(
                 """
                 INSERT INTO jobs (job_id, status, namespace, name, source_path, created_at)
@@ -212,7 +251,7 @@ class MetadataStore:
             if status in ("completed", "failed")
             else None
         )
-        async with self._write_lock:
+        async with self._get_write_lock():
             await self._db.execute(
                 """
                 UPDATE jobs
